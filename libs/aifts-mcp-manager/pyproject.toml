@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aifts-mcp-manager"
+version = "0.1.0"
+description = "DuckDB MCP Manager CLI - mcp-man"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "bjoernbethge"}]
+license = {text = "MIT"}
+dependencies = [
+    "aifts-core>=0.1.0",
+    "duckdb>=1.0",
+    "click>=8.1",
+    "rich>=13.0",
+]
+
+[project.scripts]
+mcp-man = "aifts_mcp_manager.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
