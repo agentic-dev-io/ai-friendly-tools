@@ -71,7 +71,7 @@ def serve(ctx: click.Context, database: str, host: str, port: int) -> None:
     config: Config = ctx.obj["config"]
     console.print(f"[blue]Starting[/blue] MCP server for database: {database}")
     console.print(f"[dim]Server will listen on {host}:{port}[/dim]")
-    console.print("[yellow]Feature coming soon - DuckDB MCP extension integration[/yellow]"
+    console.print("[yellow]Feature coming soon - DuckDB MCP extension integration[/yellow]")
 
 
 @cli.command()
@@ -80,7 +80,7 @@ def serve(ctx: click.Context, database: str, host: str, port: int) -> None:
 def status(ctx: click.Context, database: str) -> None:
     """Check server status and connected clients."""
     console.print(f"[blue]Status[/blue] for database: {database}")
-    console.print("[yellow]Feature coming soon[/yellow]"
+    console.print("[yellow]Feature coming soon[/yellow]")
 
 
 @cli.command()
@@ -96,7 +96,7 @@ def query(ctx: click.Context, query: str, database: str) -> None:
     config: Config = ctx.obj["config"]
     console.print(f"[blue]Executing query[/blue] on {database}:")
     console.print(f"[dim]{query}[/dim]")
-    console.print("[yellow]Feature coming soon - DuckDB MCP integration[/yellow]"
+    console.print("[yellow]Feature coming soon - DuckDB MCP integration[/yellow]")
 
 
 def main() -> None:
