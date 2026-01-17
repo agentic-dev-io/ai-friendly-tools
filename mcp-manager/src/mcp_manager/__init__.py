@@ -16,8 +16,15 @@ from .config import (
 from .gateway import MCPGateway
 from .registry import ConnectionInfo, ConnectionRegistry, ConnectionStatus
 from .security import SecurityConfig
+from .workflows import (
+    Pipeline,
+    PipelineBuilder,
+    PipelineStep,
+    WorkflowRecommender,
+)
 
 __all__ = [
+    # Gateway
     "MCPGateway",
     "GatewayConfig",
     "ConnectionConfig",
@@ -27,4 +34,9 @@ __all__ = [
     "ConnectionRegistry",
     "ConnectionInfo",
     "ConnectionStatus",
+    # Workflows
+    "Pipeline",
+    "PipelineBuilder",
+    "PipelineStep",
+    "WorkflowRecommender",
 ]

@@ -345,8 +345,8 @@ class ToolSearcher:
         """
         Search tools using semantic/vector similarity.
 
-        Uses embedding vectors for semantic search if available in the database.
-        Falls back to BM25 if no embedding column is found.
+        Uses sentence-transformers embeddings stored in DuckDB for semantic search.
+        Falls back to BM25 if embeddings are not available or vector store fails.
 
         Args:
             query: Search query string
@@ -365,48 +365,83 @@ class ToolSearcher:
             raise ValueError("Limit must be greater than 0")
 
         try:
-            # Check if embedding column exists
-            if not self._column_exists('embedding'):
-                # Fallback to BM25 if no embedding column
+            # Try to use vector store for semantic search
+            from .vector_store import VectorStore, VectorStoreConfig
+            from .embeddings import get_default_generator
+            
+            # Check if embeddings table exists
+            table_check = self.conn.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.tables 
+                WHERE table_name = 'tool_embeddings'
+                """
+            ).fetchone()
+            
+            if not table_check or table_check[0] == 0:
+                # No embeddings table, fallback to BM25
                 return self.search_bm25(query, limit)
-
-            # VSS (Vector Search SQL) approach using similarity
-            # DuckDB supports cosine similarity calculation
-            sql = """
-                SELECT 
-                    server_name,
-                    tool_name,
-                    description,
-                    CASE WHEN required_params IS NULL THEN []
-                         ELSE required_params
-                    END as required_params,
-                    CAST(1.0 AS FLOAT) as score
-                FROM mcp_tools
-                WHERE enabled = true
-                AND (
-                    tool_name ILIKE '%' || ? || '%'
-                    OR description ILIKE '%' || ? || '%'
-                    OR server_name ILIKE '%' || ? || '%'
-                )
-                ORDER BY LENGTH(tool_name) ASC
-                LIMIT ?
-            """
-
-            results = self.conn.execute(sql, [query, query, query, limit]).fetchall()
-
+            
+            # Check if there are any embeddings
+            embedding_count = self.conn.execute(
+                "SELECT COUNT(*) FROM tool_embeddings"
+            ).fetchone()
+            
+            if not embedding_count or embedding_count[0] == 0:
+                # No embeddings stored, fallback to BM25
+                return self.search_bm25(query, limit)
+            
+            # Use vector store for semantic search
+            config = VectorStoreConfig(table_name="tool_embeddings")
+            vector_store = VectorStore(self.conn, config)
+            
+            # Perform semantic search
+            vector_results = vector_store.search_by_text(
+                query,
+                limit=limit,
+                min_similarity=0.0,
+            )
+            
+            # Convert to SearchResult format
             return [
                 SearchResult(
-                    server=row[0],
-                    tool=row[1],
-                    description=row[2],
-                    required_params=row[3] if row[3] else [],
-                    score=row[4]
+                    server=r.server_name,
+                    tool=r.tool_name,
+                    description=r.description or "",
+                    required_params=self._get_required_params(r.tool_id),
+                    score=r.similarity_score
                 )
-                for row in results
+                for r in vector_results
             ]
 
+        except ImportError:
+            # sentence-transformers not available, fallback to BM25
+            return self.search_bm25(query, limit)
         except Exception as e:
-            raise ValueError(f"Semantic search failed: {e}")
+            # Any error in semantic search, fallback to BM25
+            try:
+                return self.search_bm25(query, limit)
+            except Exception:
+                raise ValueError(f"Semantic search failed: {e}")
+    
+    def _get_required_params(self, tool_id: int) -> list[str]:
+        """Get required parameters for a tool by ID.
+        
+        Args:
+            tool_id: Tool ID
+            
+        Returns:
+            List of required parameter names
+        """
+        try:
+            result = self.conn.execute(
+                "SELECT required_params FROM mcp_tools WHERE id = ?",
+                [tool_id]
+            ).fetchone()
+            if result and result[0]:
+                return result[0] if isinstance(result[0], list) else []
+            return []
+        except Exception:
+            return []
 
     async def search(
         self,

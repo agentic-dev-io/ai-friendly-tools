@@ -26,6 +26,20 @@ from .tools.search import ToolSearcher
 from .tools.execution import ToolExecutor, ExecutionContext
 from .tools.validation import ToolValidator, ToolErrorSuggester
 
+# AI feature imports
+from .ai.nlp import NaturalLanguageProcessor, IntentClassifier
+from .ai.examples import ExampleGenerator, UsageExample
+from .ai.llm_export import LLMExporter, ExportFormat, ExportConfig
+from .ai.suggestions import ToolSuggester, SuggestionContext
+from .ai.workflows import (
+    Workflow,
+    WorkflowStep,
+    WorkflowRunner,
+    WorkflowBuilder,
+    WorkflowRegistry,
+    WorkflowStatus,
+)
+
 app = typer.Typer(
     name="mcp-man",
     help="DuckDB MCP Gateway - Centralized gateway for managing multiple MCP server connections",
@@ -35,9 +49,11 @@ app = typer.Typer(
 # Sub-apps
 gateway_app = typer.Typer(name="gateway", help="Manage MCP gateway")
 security_app = typer.Typer(name="security", help="Manage security settings")
+workflow_app = typer.Typer(name="workflow", help="Manage tool pipelines/workflows")
 
 app.add_typer(gateway_app)
 app.add_typer(security_app)
+app.add_typer(workflow_app)
 
 console = Console()
 
@@ -477,8 +493,17 @@ def search(
     method: str = typer.Option("bm25", "--method", help="Search method: bm25, regex, exact, semantic"),
     limit: int = typer.Option(5, "--limit", help="Max results"),
     json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+    semantic: bool = typer.Option(False, "--semantic", help="Use semantic/AI-powered search"),
+    intent: bool = typer.Option(False, "--intent", help="Classify user intent and optimize search"),
 ) -> None:
-    """Search for MCP tools using FTS or pattern matching."""
+    """Search for MCP tools using FTS or pattern matching.
+    
+    Use --semantic for AI-powered semantic search.
+    Use --intent to classify query intent and optimize search.
+    """
+    # Override method if semantic flag is set
+    if semantic:
+        method = "semantic"
     config = get_config()
 
     try:
@@ -660,9 +685,14 @@ def tools(
 def inspect(
     server: str = typer.Argument(..., help="Server name"),
     tool: str = typer.Argument(..., help="Tool name"),
-    example: bool = typer.Option(False, "--example", help="Show example call"),
+    example: bool = typer.Option(False, "--example", help="Show basic example call"),
+    examples_flag: bool = typer.Option(False, "--examples", help="Show AI-generated examples with realistic values"),
 ) -> None:
-    """Show detailed info about a tool."""
+    """Show detailed info about a tool.
+    
+    Use --example for basic placeholder example.
+    Use --examples for AI-generated examples with realistic values.
+    """
     config = get_config()
 
     try:
@@ -682,7 +712,7 @@ def inspect(
             result = conn.execute(query, [server, tool]).fetchone()
             
             if not result:
-                console.print(f"[red]✗[/red] Tool '{tool}' not found on server '{server}'")
+                console.print(f"[red]x[/red] Tool '{tool}' not found on server '{server}'")
                 raise typer.Exit(1)
             
             tool_name, description, input_schema, required_params = result
@@ -714,9 +744,9 @@ def inspect(
                 console.print(f"\n[bold]Required Parameters:[/bold]")
                 params_list = required_params if isinstance(required_params, list) else [required_params]
                 for param in params_list:
-                    console.print(f"  • {param}")
+                    console.print(f"  . {param}")
             
-            # Show example if requested
+            # Show basic example if requested
             if example:
                 console.print("\n[bold]Example Call:[/bold]")
                 example_args = {}
@@ -728,13 +758,32 @@ def inspect(
                 example_json = json.dumps(example_args, indent=2)
                 console.print(f"[dim]mcp-man call {server} {tool_name} '{example_json}'[/dim]")
             
+            # Show AI-generated examples if requested
+            if examples_flag:
+                from .tools.schema import ToolSchema
+                tool_schema = ToolSchema(
+                    server_name=server,
+                    tool_name=tool_name,
+                    description=description,
+                    input_schema=json.loads(input_schema) if isinstance(input_schema, str) else input_schema,
+                    required_params=required_params if isinstance(required_params, list) else [],
+                )
+                
+                generator = ExampleGenerator()
+                generated_examples = generator.generate_multiple(tool_schema, count=3)
+                
+                console.print("\n[bold]Generated Examples:[/bold]")
+                for i, ex in enumerate(generated_examples, 1):
+                    console.print(f"\n[cyan]Example {i}:[/cyan] {ex.description}")
+                    console.print(f"[dim]{ex.to_cli_command()}[/dim]")
+            
             logger.info(f"Inspected tool {server}/{tool_name}")
             
         finally:
             gateway.shutdown()
             
     except Exception as e:
-        console.print(f"[red]✗[/red] Failed to inspect tool: {e}")
+        console.print(f"[red]x[/red] Failed to inspect tool: {e}")
         logger.exception("Tool inspection failed")
         raise typer.Exit(1)
 
@@ -748,8 +797,12 @@ def call(
     json_mode: bool = typer.Option(False, "--json", help="JSON output"),
     validate: bool = typer.Option(True, "--validate/--no-validate", help="Validate arguments"),
     show_timing: bool = typer.Option(False, "--timing", help="Show execution timing"),
+    suggest_next: bool = typer.Option(False, "--suggest-next", help="Show suggested next tools after execution"),
 ) -> None:
-    """Execute a tool on an MCP server with validation and error handling."""
+    """Execute a tool on an MCP server with validation and error handling.
+    
+    Use --suggest-next to get recommendations for follow-up tools.
+    """
     config = get_config()
 
     try:
@@ -836,8 +889,17 @@ def call(
                     if show_timing:
                         console.print(f"[dim]Execution time: {exec_result.execution_time_ms}ms[/dim]")
                     
+                    # Show suggested next tools if requested
+                    if suggest_next:
+                        suggester = ToolSuggester(conn)
+                        suggestions = suggester.suggest_next(server, tool, limit=3)
+                        if suggestions:
+                            console.print("\n[bold]Suggested next tools:[/bold]")
+                            for s in suggestions:
+                                console.print(f"  . [cyan]{s.tool_name}[/cyan] - {s.description[:40]}... [{s.confidence:.0%}]")
+                    
                 else:
-                    console.print(f"[red]✗[/red] Tool execution failed")
+                    console.print(f"[red]x[/red] Tool execution failed")
                     
                     # Show validation errors if any
                     if exec_result.validation_errors and not exec_result.validation_errors.is_valid:
@@ -1084,6 +1146,652 @@ def history(
     except Exception as e:
         console.print(f"[red]✗[/red] Failed to retrieve history: {e}")
         logger.exception("History retrieval failed")
+        raise typer.Exit(1)
+
+
+# =============================================================================
+# NEW AI FEATURE COMMANDS
+# =============================================================================
+
+
+@app.command()
+def ask(
+    query: str = typer.Argument(..., help="Natural language query"),
+    limit: int = typer.Option(5, "--limit", help="Max results"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Search tools using natural language query.
+    
+    Uses NLP to understand your intent and find the most relevant tools.
+    
+    Examples:
+        mcp-man ask "find tools to read files"
+        mcp-man ask "how can I query a database"
+        mcp-man ask "tools for API requests"
+    """
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Use NLP processor
+            nlp = NaturalLanguageProcessor(conn)
+            result = nlp.process(query)
+            
+            if json_mode:
+                output = {
+                    "query": query,
+                    "intent": result.query.intent.name,
+                    "tools": [
+                        {
+                            "server": t.server,
+                            "tool": t.tool,
+                            "description": t.description,
+                            "score": t.score,
+                        }
+                        for t in result.tools
+                    ],
+                    "suggestions": result.suggestions,
+                }
+                console.print(json.dumps(output, indent=2))
+            else:
+                # Show intent
+                console.print(f"[dim]Intent: {result.query.intent.name}[/dim]")
+                
+                if result.tools:
+                    table = Table(title=f"Results for: \"{query}\"")
+                    table.add_column("Server", style="cyan")
+                    table.add_column("Tool", style="green")
+                    table.add_column("Description", style="white")
+                    table.add_column("Relevance", style="magenta")
+                    
+                    for tool in result.tools[:limit]:
+                        table.add_row(
+                            tool.server,
+                            tool.tool,
+                            tool.description[:50] + "..." if len(tool.description) > 50 else tool.description,
+                            f"{tool.score:.0%}",
+                        )
+                    
+                    console.print(table)
+                else:
+                    console.print("[yellow]No tools found matching your query[/yellow]")
+                
+                # Show suggestions
+                if result.suggestions:
+                    console.print("\n[bold]Suggestions:[/bold]")
+                    for suggestion in result.suggestions:
+                        console.print(f"  [dim]{suggestion}[/dim]")
+            
+            logger.info(f"NLP search for '{query}' completed")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to process query: {e}")
+        logger.exception("NLP query failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def examples(
+    server: str = typer.Argument(..., help="Server name"),
+    tool: str = typer.Argument(..., help="Tool name"),
+    count: int = typer.Option(3, "--count", "-n", help="Number of examples to generate"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Show auto-generated usage examples for a tool.
+    
+    Generates realistic example calls based on the tool's schema.
+    """
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Get tool schema
+            query_str = """
+                SELECT tool_name, description, input_schema, required_params
+                FROM mcp_tools
+                WHERE server_name = ? AND tool_name = ? AND enabled = true
+            """
+            result = conn.execute(query_str, [server, tool]).fetchone()
+            
+            if not result:
+                console.print(f"[red]x[/red] Tool '{tool}' not found on server '{server}'")
+                raise typer.Exit(1)
+            
+            tool_name, description, input_schema, required_params = result
+            
+            # Create tool schema object
+            from .tools.schema import ToolSchema
+            tool_schema = ToolSchema(
+                server_name=server,
+                tool_name=tool_name,
+                description=description,
+                input_schema=json.loads(input_schema) if isinstance(input_schema, str) else input_schema,
+                required_params=required_params if isinstance(required_params, list) else [],
+            )
+            
+            # Generate examples
+            generator = ExampleGenerator()
+            generated_examples = generator.generate_multiple(tool_schema, count=count)
+            
+            if json_mode:
+                output = [ex.to_dict() for ex in generated_examples]
+                console.print(json.dumps(output, indent=2))
+            else:
+                console.print(Panel(
+                    f"[bold cyan]{tool_name}[/bold cyan]\n{description}",
+                    title=f"[bold]Examples for {server}/{tool_name}[/bold]",
+                    border_style="blue",
+                ))
+                
+                for i, ex in enumerate(generated_examples, 1):
+                    console.print(f"\n[bold]Example {i}:[/bold] {ex.description}")
+                    console.print(f"[dim]{ex.to_cli_command()}[/dim]")
+                    
+                    syntax = Syntax(
+                        json.dumps(ex.arguments, indent=2),
+                        "json",
+                        theme="monokai",
+                        line_numbers=False,
+                    )
+                    console.print(syntax)
+            
+            logger.info(f"Generated {count} examples for {server}/{tool}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to generate examples: {e}")
+        logger.exception("Example generation failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def export(
+    format: str = typer.Argument("json", help="Export format: json, markdown, md, xml, openai, anthropic, yaml"),
+    tool_filter: Optional[str] = typer.Option(None, "--tool", help="Filter by tool name pattern"),
+    server_filter: Optional[str] = typer.Option(None, "--server", help="Filter by server name"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file path"),
+    include_examples: bool = typer.Option(False, "--examples", help="Include generated examples"),
+    compact: bool = typer.Option(False, "--compact", help="Compact output (no indentation)"),
+) -> None:
+    """Export tools documentation in various formats.
+    
+    Formats:
+        json      - JSON format for programmatic use
+        markdown  - Markdown documentation
+        xml       - XML format
+        openai    - OpenAI function calling format
+        anthropic - Anthropic tool use format
+        yaml      - YAML format
+    """
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Build query
+            query_str = "SELECT server_name, tool_name, description, input_schema, required_params FROM mcp_tools WHERE enabled = true"
+            params: list[Any] = []
+            
+            if server_filter:
+                query_str += " AND server_name ILIKE ?"
+                params.append(f"%{server_filter}%")
+            
+            if tool_filter:
+                query_str += " AND tool_name ILIKE ?"
+                params.append(f"%{tool_filter}%")
+            
+            query_str += " ORDER BY server_name, tool_name"
+            
+            results = conn.execute(query_str, params).fetchall()
+            
+            if not results:
+                console.print("[yellow]No tools found to export[/yellow]")
+                return
+            
+            # Create tool schemas
+            from .tools.schema import ToolSchema
+            tools = [
+                ToolSchema(
+                    server_name=row[0],
+                    tool_name=row[1],
+                    description=row[2],
+                    input_schema=json.loads(row[3]) if isinstance(row[3], str) else row[3],
+                    required_params=row[4] if isinstance(row[4], list) else [],
+                )
+                for row in results
+            ]
+            
+            # Export
+            exporter = LLMExporter()
+            export_config = ExportConfig(
+                include_examples=include_examples,
+                compact=compact,
+            )
+            
+            try:
+                export_format = ExportFormat(format.lower())
+            except ValueError:
+                console.print(f"[red]x[/red] Unknown format: {format}")
+                console.print("[dim]Available: json, markdown, md, xml, openai, anthropic, yaml[/dim]")
+                raise typer.Exit(1)
+            
+            content = exporter.export(tools, export_format, export_config)
+            
+            if output:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text(content, encoding="utf-8")
+                console.print(f"[green].[/green] Exported {len(tools)} tools to: {output}")
+            else:
+                console.print(content)
+            
+            logger.info(f"Exported {len(tools)} tools in {format} format")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]x[/red] Export failed: {e}")
+        logger.exception("Export failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def suggest(
+    server: str = typer.Argument(..., help="Server name"),
+    tool: str = typer.Argument(..., help="Current tool name"),
+    limit: int = typer.Option(5, "--limit", help="Max suggestions"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Suggest next tools based on usage patterns.
+    
+    Analyzes execution history to suggest commonly-used follow-up tools.
+    """
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Get suggestions
+            suggester = ToolSuggester(conn)
+            suggestions = suggester.suggest_next(server, tool, limit=limit)
+            
+            if json_mode:
+                output = [s.to_dict() for s in suggestions]
+                console.print(json.dumps(output, indent=2))
+            else:
+                if suggestions:
+                    console.print(f"[bold]Suggested next tools after {server}/{tool}:[/bold]\n")
+                    
+                    table = Table()
+                    table.add_column("Tool", style="green")
+                    table.add_column("Server", style="cyan")
+                    table.add_column("Description", style="white")
+                    table.add_column("Confidence", style="magenta")
+                    
+                    for s in suggestions:
+                        table.add_row(
+                            s.tool_name,
+                            s.server_name,
+                            s.description[:40] + "..." if len(s.description) > 40 else s.description,
+                            f"{s.confidence:.0%}",
+                        )
+                    
+                    console.print(table)
+                    
+                    if suggestions[0].reason:
+                        console.print(f"\n[dim]{suggestions[0].reason}[/dim]")
+                else:
+                    console.print("[yellow]No suggestions available yet[/yellow]")
+                    console.print("[dim]Run more tools to build up usage patterns[/dim]")
+            
+            logger.info(f"Generated {len(suggestions)} suggestions for {server}/{tool}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to get suggestions: {e}")
+        logger.exception("Suggestion failed")
+        raise typer.Exit(1)
+
+
+# =============================================================================
+# WORKFLOW COMMANDS
+# =============================================================================
+
+
+@workflow_app.command("create")
+def workflow_create(
+    name: str = typer.Argument(..., help="Workflow name"),
+    description: str = typer.Option("", "--description", "-d", help="Workflow description"),
+    steps_json: Optional[str] = typer.Option(None, "--steps", help="JSON array of steps"),
+    from_file: Optional[Path] = typer.Option(None, "--from-file", "-f", help="Load workflow from JSON file"),
+) -> None:
+    """Create a new workflow/pipeline.
+    
+    Examples:
+        mcp-man workflow create "ETL Pipeline" --description "Extract, transform, load"
+        mcp-man workflow create "Data Process" --from-file workflow.json
+    """
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Build workflow
+            if from_file:
+                if not from_file.exists():
+                    console.print(f"[red]x[/red] File not found: {from_file}")
+                    raise typer.Exit(1)
+                
+                workflow_data = json.loads(from_file.read_text())
+                builder = WorkflowBuilder().from_template(workflow_data)
+                workflow = builder.build()
+                workflow.name = name  # Override name
+            elif steps_json:
+                steps_data = json.loads(steps_json)
+                builder = WorkflowBuilder().name(name).description(description)
+                
+                for step in steps_data:
+                    builder.add_step(
+                        step["id"],
+                        step.get("name", step["id"]),
+                        step["server"],
+                        step["tool"],
+                        step.get("arguments", {}),
+                        depends_on=step.get("depends_on"),
+                    )
+                
+                workflow = builder.build()
+            else:
+                # Create empty workflow for later editing
+                workflow = WorkflowBuilder().name(name).description(description).build()
+            
+            # Register workflow
+            registry = WorkflowRegistry(conn)
+            registry.register(workflow)
+            
+            console.print(f"[green].[/green] Workflow created: {workflow.name}")
+            console.print(f"[dim]ID: {workflow.id}[/dim]")
+            console.print(f"[dim]Steps: {len(workflow.steps)}[/dim]")
+            
+            logger.info(f"Created workflow: {workflow.id}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except json.JSONDecodeError as e:
+        console.print(f"[red]x[/red] Invalid JSON: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to create workflow: {e}")
+        logger.exception("Workflow creation failed")
+        raise typer.Exit(1)
+
+
+@workflow_app.command("run")
+def workflow_run(
+    workflow_id: str = typer.Argument(..., help="Workflow ID"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show execution plan without running"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Run a workflow/pipeline."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Get workflow
+            registry = WorkflowRegistry(conn)
+            workflow = registry.get(workflow_id)
+            
+            if not workflow:
+                console.print(f"[red]x[/red] Workflow not found: {workflow_id}")
+                raise typer.Exit(1)
+            
+            # Run workflow
+            runner = WorkflowRunner(conn)
+            
+            if dry_run:
+                console.print(f"[bold]Dry run for workflow: {workflow.name}[/bold]\n")
+            
+            with console.status(f"[bold green]Running {workflow.name}..."):
+                result = runner.run(workflow, dry_run=dry_run)
+            
+            if json_mode:
+                console.print(json.dumps(result.to_dict(), indent=2))
+            else:
+                # Show results
+                status_icon = "[green].[/green]" if result.is_success() else "[red]x[/red]"
+                console.print(f"{status_icon} Workflow {result.status.value}: {workflow.name}")
+                
+                if dry_run:
+                    console.print("\n[bold]Planned execution order:[/bold]")
+                    for i, step_id in enumerate(result.planned_steps, 1):
+                        console.print(f"  {i}. {step_id}")
+                else:
+                    if result.step_results:
+                        console.print("\n[bold]Step Results:[/bold]")
+                        
+                        table = Table()
+                        table.add_column("Step", style="cyan")
+                        table.add_column("Status", style="yellow")
+                        table.add_column("Duration", style="magenta")
+                        
+                        for sr in result.step_results:
+                            status = "[green].[/green]" if sr.status.value == "success" else "[red]x[/red]"
+                            duration = f"{sr.duration_ms}ms" if sr.duration_ms else "N/A"
+                            table.add_row(sr.step_id, status, duration)
+                        
+                        console.print(table)
+                
+                if result.error:
+                    console.print(f"\n[red]Error: {result.error}[/red]")
+            
+            logger.info(f"Workflow {workflow_id} completed with status: {result.status.value}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to run workflow: {e}")
+        logger.exception("Workflow execution failed")
+        raise typer.Exit(1)
+
+
+@workflow_app.command("list")
+def workflow_list(
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """List all workflows."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            registry = WorkflowRegistry(conn)
+            workflows = registry.list_all()
+            
+            if not workflows:
+                console.print("[yellow]No workflows found[/yellow]")
+                return
+            
+            if json_mode:
+                output = [
+                    {
+                        "id": wf.id,
+                        "name": wf.name,
+                        "description": wf.description,
+                        "steps": len(wf.steps),
+                    }
+                    for wf in workflows
+                ]
+                console.print(json.dumps(output, indent=2))
+            else:
+                table = Table(title="Workflows")
+                table.add_column("ID", style="cyan")
+                table.add_column("Name", style="green")
+                table.add_column("Description", style="white")
+                table.add_column("Steps", style="magenta")
+                
+                for wf in workflows:
+                    table.add_row(
+                        wf.id,
+                        wf.name,
+                        wf.description[:40] + "..." if len(wf.description) > 40 else wf.description,
+                        str(len(wf.steps)),
+                    )
+                
+                console.print(table)
+            
+            logger.info(f"Listed {len(workflows)} workflows")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to list workflows: {e}")
+        logger.exception("Workflow listing failed")
+        raise typer.Exit(1)
+
+
+@workflow_app.command("delete")
+def workflow_delete(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to delete"),
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation"),
+) -> None:
+    """Delete a workflow."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            registry = WorkflowRegistry(conn)
+            
+            # Check if exists
+            workflow = registry.get(workflow_id)
+            if not workflow:
+                console.print(f"[red]x[/red] Workflow not found: {workflow_id}")
+                raise typer.Exit(1)
+            
+            # Confirm deletion
+            if not force:
+                confirm = typer.confirm(f"Delete workflow '{workflow.name}'?")
+                if not confirm:
+                    console.print("[yellow]Cancelled[/yellow]")
+                    return
+            
+            registry.delete(workflow_id)
+            
+            console.print(f"[green].[/green] Deleted workflow: {workflow.name}")
+            logger.info(f"Deleted workflow: {workflow_id}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to delete workflow: {e}")
+        logger.exception("Workflow deletion failed")
+        raise typer.Exit(1)
+
+
+@workflow_app.command("show")
+def workflow_show(
+    workflow_id: str = typer.Argument(..., help="Workflow ID"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Show workflow details."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            registry = WorkflowRegistry(conn)
+            workflow = registry.get(workflow_id)
+            
+            if not workflow:
+                console.print(f"[red]x[/red] Workflow not found: {workflow_id}")
+                raise typer.Exit(1)
+            
+            if json_mode:
+                console.print(workflow.to_json())
+            else:
+                console.print(Panel(
+                    f"[bold cyan]{workflow.name}[/bold cyan]\n{workflow.description}",
+                    title=f"[bold]Workflow: {workflow.id}[/bold]",
+                    border_style="blue",
+                ))
+                
+                console.print(f"\n[bold]Steps ({len(workflow.steps)}):[/bold]")
+                
+                for i, step in enumerate(workflow.steps, 1):
+                    if isinstance(step, WorkflowStep):
+                        deps = f" [dim](depends on: {', '.join(step.depends_on)})[/dim]" if step.depends_on else ""
+                        console.print(f"  {i}. [cyan]{step.id}[/cyan]: {step.server}/{step.tool}{deps}")
+            
+            logger.info(f"Showed workflow: {workflow_id}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]x[/red] Failed to show workflow: {e}")
+        logger.exception("Workflow show failed")
         raise typer.Exit(1)
 
 
