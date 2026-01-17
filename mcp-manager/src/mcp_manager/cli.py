@@ -2,20 +2,27 @@
 CLI interface for mcp-man - DuckDB MCP Manager
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import typer
 from core.config import Config, get_config
 from core.logging import setup_logging
+from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 
+from .agent.templates import AgentMarkdownGenerator
+from .client import call_tool
 from .config import ConnectionConfig, GatewayConfig
+from .discovery.scanner import AsyncToolScanner, ToolRegistry
 from .gateway import MCPGateway
+from .tools.search import ToolSearcher
 
 app = typer.Typer(
     name="mcp-man",
@@ -459,6 +466,459 @@ def security_list() -> None:
 
     except Exception as e:
         console.print(f"[red]✗[/red] Failed to list security: {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query"),
+    method: str = typer.Option("bm25", "--method", help="Search method: bm25, regex, exact, semantic"),
+    limit: int = typer.Option(5, "--limit", help="Max results"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Search for MCP tools using FTS or pattern matching."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        # Get database connection
+        conn = gateway.get_database_connection("default")
+        
+        try:
+            # Initialize searcher
+            searcher = ToolSearcher(conn)
+            
+            # Execute search based on method
+            if method == "bm25":
+                results = searcher.search_bm25(query, limit)
+            elif method == "regex":
+                results = searcher.search_regex(query, limit)
+            elif method == "exact":
+                results = searcher.search_exact(query, limit)
+            elif method == "semantic":
+                results = searcher.search_semantic(query, limit)
+            else:
+                console.print(f"[red]✗[/red] Unknown search method: {method}")
+                raise typer.Exit(1)
+            
+            if not results:
+                console.print(f"[yellow]No tools found matching '{query}'[/yellow]")
+                gateway.shutdown()
+                return
+            
+            if json_mode:
+                output = [
+                    {
+                        "server": r.server,
+                        "tool": r.tool,
+                        "description": r.description,
+                        "required_params": r.required_params,
+                        "score": r.score
+                    }
+                    for r in results
+                ]
+                console.print(json.dumps(output, indent=2))
+            else:
+                # Create results table
+                table = Table(title=f"Search Results ({len(results)} found)")
+                table.add_column("Server", style="cyan")
+                table.add_column("Tool", style="green")
+                table.add_column("Description", style="white")
+                table.add_column("Required Params", style="yellow")
+                table.add_column("Score", style="magenta")
+                
+                for result in results:
+                    params = ", ".join(result.required_params) if result.required_params else "—"
+                    table.add_row(
+                        result.server,
+                        result.tool,
+                        result.description[:50] + "..." if len(result.description) > 50 else result.description,
+                        params,
+                        f"{result.score:.2f}"
+                    )
+                
+                console.print(table)
+            
+            logger.info(f"Search for '{query}' returned {len(results)} results")
+            
+        finally:
+            gateway.shutdown()
+            
+    except ValueError as e:
+        console.print(f"[red]✗[/red] Search error: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to search tools: {e}")
+        logger.exception("Tool search failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def tools(
+    server: Optional[str] = typer.Argument(None, help="Server name (optional)"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """List MCP tools from servers."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        # Get database connection
+        conn = gateway.get_database_connection("default")
+        
+        try:
+            # Query tools from database
+            if server:
+                query = "SELECT server_name, tool_name, description, required_params FROM mcp_tools WHERE server_name = ? AND enabled = true ORDER BY tool_name"
+                results = conn.execute(query, [server]).fetchall()
+                
+                if not results:
+                    console.print(f"[yellow]No tools found for server '{server}'[/yellow]")
+                    gateway.shutdown()
+                    return
+            else:
+                query = "SELECT server_name, tool_name, description, required_params FROM mcp_tools WHERE enabled = true ORDER BY server_name, tool_name"
+                results = conn.execute(query).fetchall()
+                
+                if not results:
+                    console.print("[yellow]No tools found in registry[/yellow]")
+                    gateway.shutdown()
+                    return
+            
+            if json_mode:
+                output = [
+                    {
+                        "server": row[0],
+                        "tool": row[1],
+                        "description": row[2],
+                        "required_params": row[3] if row[3] else []
+                    }
+                    for row in results
+                ]
+                console.print(json.dumps(output, indent=2))
+            else:
+                # Group by server if not filtered
+                if not server:
+                    servers_dict: dict[str, list] = {}
+                    for row in results:
+                        server_name = row[0]
+                        if server_name not in servers_dict:
+                            servers_dict[server_name] = []
+                        servers_dict[server_name].append(row)
+                    
+                    for srv_name in sorted(servers_dict.keys()):
+                        table = Table(title=f"[bold cyan]{srv_name}[/bold cyan] ({len(servers_dict[srv_name])} tools)")
+                        table.add_column("Tool", style="green")
+                        table.add_column("Description", style="white")
+                        table.add_column("Required Params", style="yellow")
+                        
+                        for row in servers_dict[srv_name]:
+                            params = ", ".join(row[3]) if row[3] else "—"
+                            table.add_row(
+                                row[1],
+                                row[2][:50] + "..." if len(row[2]) > 50 else row[2],
+                                params
+                            )
+                        
+                        console.print(table)
+                        console.print()
+                else:
+                    # Single server view
+                    table = Table(title=f"[bold cyan]{server}[/bold cyan] ({len(results)} tools)")
+                    table.add_column("Tool", style="green")
+                    table.add_column("Description", style="white")
+                    table.add_column("Required Params", style="yellow")
+                    
+                    for row in results:
+                        params = ", ".join(row[3]) if row[3] else "—"
+                        table.add_row(
+                            row[1],
+                            row[2][:50] + "..." if len(row[2]) > 50 else row[2],
+                            params
+                        )
+                    
+                    console.print(table)
+            
+            logger.info(f"Listed {len(results)} tools")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to list tools: {e}")
+        logger.exception("Tool listing failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def inspect(
+    server: str = typer.Argument(..., help="Server name"),
+    tool: str = typer.Argument(..., help="Tool name"),
+    example: bool = typer.Option(False, "--example", help="Show example call"),
+) -> None:
+    """Show detailed info about a tool."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        # Get database connection
+        conn = gateway.get_database_connection("default")
+        
+        try:
+            # Query tool details
+            query = """
+                SELECT tool_name, description, input_schema, required_params 
+                FROM mcp_tools 
+                WHERE server_name = ? AND tool_name = ? AND enabled = true
+            """
+            result = conn.execute(query, [server, tool]).fetchone()
+            
+            if not result:
+                console.print(f"[red]✗[/red] Tool '{tool}' not found on server '{server}'")
+                raise typer.Exit(1)
+            
+            tool_name, description, input_schema, required_params = result
+            
+            # Display tool information
+            console.print(Panel(
+                f"[bold cyan]{tool_name}[/bold cyan]\n{description}",
+                title=f"[bold]{server}/{tool_name}[/bold]",
+                border_style="blue"
+            ))
+            
+            # Display schema
+            if input_schema:
+                try:
+                    schema_dict = json.loads(input_schema) if isinstance(input_schema, str) else input_schema
+                    console.print("\n[bold]Input Schema:[/bold]")
+                    syntax = Syntax(
+                        json.dumps(schema_dict, indent=2),
+                        "json",
+                        theme="monokai",
+                        line_numbers=False
+                    )
+                    console.print(syntax)
+                except Exception as e:
+                    console.print(f"[yellow]Could not parse schema: {e}[/yellow]")
+            
+            # Display required parameters
+            if required_params:
+                console.print(f"\n[bold]Required Parameters:[/bold]")
+                params_list = required_params if isinstance(required_params, list) else [required_params]
+                for param in params_list:
+                    console.print(f"  • {param}")
+            
+            # Show example if requested
+            if example:
+                console.print("\n[bold]Example Call:[/bold]")
+                example_args = {}
+                if required_params:
+                    params_list = required_params if isinstance(required_params, list) else [required_params]
+                    for param in params_list:
+                        example_args[param] = "<value>"
+                
+                example_json = json.dumps(example_args, indent=2)
+                console.print(f"[dim]mcp-man call {server} {tool_name} '{example_json}'[/dim]")
+            
+            logger.info(f"Inspected tool {server}/{tool_name}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to inspect tool: {e}")
+        logger.exception("Tool inspection failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def call(
+    server: str = typer.Argument(..., help="Server name"),
+    tool: str = typer.Argument(..., help="Tool name"),
+    arguments: str = typer.Argument("{}", help="JSON arguments"),
+    stdin: bool = typer.Option(False, "--stdin", help="Read args from stdin"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+) -> None:
+    """Execute a tool on an MCP server."""
+    config = get_config()
+
+    try:
+        # Parse arguments
+        if stdin:
+            import sys
+            arguments = sys.stdin.read()
+        
+        try:
+            args_dict: dict[str, Any] = json.loads(arguments)
+        except json.JSONDecodeError as e:
+            console.print(f"[red]✗[/red] Invalid JSON arguments: {e}")
+            raise typer.Exit(1)
+        
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            # Get database connection and call the tool
+            conn = gateway.get_database_connection("default")
+            result = call_tool(conn, server, tool, args_dict)
+            
+            if json_mode:
+                console.print(json.dumps(result, indent=2))
+            else:
+                # Display result
+                if isinstance(result, str):
+                    try:
+                        result = json.loads(result)
+                    except json.JSONDecodeError:
+                        pass
+                
+                if isinstance(result, dict) and "error" in result:
+                    console.print(f"[red]✗[/red] Tool execution failed: {result['error']}")
+                else:
+                    console.print("[green]✓[/green] Tool executed successfully")
+                    syntax = Syntax(
+                        json.dumps(result, indent=2) if isinstance(result, dict) else str(result),
+                        "json",
+                        theme="monokai",
+                        line_numbers=False
+                    )
+                    console.print(syntax)
+            
+            # Log execution
+            logger.info(f"Executed tool {server}/{tool} with args {args_dict}")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to call tool: {e}")
+        logger.exception("Tool execution failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def refresh() -> None:
+    """Refresh tool index from all servers."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            with console.status("[bold green]Scanning all servers..."):
+                async def scan_servers() -> int:
+                    scanner = AsyncToolScanner()
+                    tool_registry = ToolRegistry()
+                    total_tools = 0
+                    
+                    for conn_info in gateway.registry.list_all():
+                        try:
+                            logger.info(f"Scanning server: {conn_info.name}")
+                            tools = await scanner.scan_server(conn_info.name)
+                            tool_registry.add_tools(conn_info.name, tools)
+                            total_tools += len(tools)
+                        except Exception as e:
+                            logger.warning(f"Failed to scan {conn_info.name}: {e}")
+                    
+                    return total_tools
+                
+                total = asyncio.run(scan_servers())
+            
+            console.print(f"[green]✓[/green] Tool index refreshed")
+            console.print(f"[dim]Discovered {total} tools across all servers[/dim]")
+            logger.info(f"Tool index refresh complete: {total} tools discovered")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to refresh tool index: {e}")
+        logger.exception("Tool index refresh failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def agent(
+    output: Optional[Path] = typer.Option(None, "--output", help="Save to file"),
+) -> None:
+    """Generate AGENT.md for Claude/Agents."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            with console.status("[bold green]Generating AGENT.md..."):
+                # Get all tools from database
+                conn = gateway.get_database_connection("default")
+                
+                query = """
+                    SELECT server_name, tool_name, description, required_params
+                    FROM mcp_tools
+                    WHERE enabled = true
+                    ORDER BY server_name, tool_name
+                """
+                results = conn.execute(query).fetchall()
+                
+                if not results:
+                    console.print("[yellow]No tools found to document[/yellow]")
+                    gateway.shutdown()
+                    return
+                
+                # Generate markdown
+                generator = AgentMarkdownGenerator()
+                
+                # Group tools by server
+                servers_tools: dict[str, list] = {}
+                for row in results:
+                    server_name = row[0]
+                    if server_name not in servers_tools:
+                        servers_tools[server_name] = []
+                    servers_tools[server_name].append({
+                        "name": row[1],
+                        "description": row[2],
+                        "params": row[3] if row[3] else []
+                    })
+                
+                # Build markdown content
+                markdown_content = "# MCP Tools Documentation\n\n"
+                markdown_content += f"Generated: {json.dumps({'timestamp': str(gateway_config.databases)}, indent=2)}\n\n"
+                markdown_content += "## Available Servers and Tools\n\n"
+                
+                for server_name in sorted(servers_tools.keys()):
+                    tools = servers_tools[server_name]
+                    markdown_content += f"### {server_name}\n\n"
+                    markdown_content += f"**Available Tools:** {len(tools)}\n\n"
+                    
+                    for tool in tools:
+                        params = ", ".join(tool["params"]) if tool["params"] else "none"
+                        markdown_content += f"- **{tool['name']}**: {tool['description']}\n"
+                        markdown_content += f"  - Required parameters: {params}\n\n"
+                
+                # Save or print
+                if output:
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text(markdown_content)
+                    console.print(f"[green]✓[/green] AGENT.md saved to: {output}")
+                    logger.info(f"AGENT.md generated and saved to {output}")
+                else:
+                    console.print(markdown_content)
+                    logger.info("AGENT.md generated and displayed")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to generate AGENT.md: {e}")
+        logger.exception("AGENT.md generation failed")
         raise typer.Exit(1)
 
 
