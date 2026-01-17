@@ -220,6 +220,113 @@ def test():
     console.print("\n[bold green]Testing complete![/bold green]")
 
 
+@app.command()
+def list_tools():
+    """List all available AIFT tools and subcommands."""
+    console.print("[bold cyan]Available AIFT Tools:[/bold cyan]\n")
+    logger.info("Listing available tools")
+
+    tools = Table(title="Tools", show_header=True, header_style="bold magenta")
+    tools.add_column("Tool", style="cyan", no_wrap=True)
+    tools.add_column("Description", style="green")
+    tools.add_column("Module", style="yellow")
+
+    tool_list = [
+        ("core", "Core AIFT functionality - configuration, logging, and CLI base", "aift.cli"),
+        ("web", "Web intelligence suite - search, scraping, and API calls", "web.cli"),
+        ("mcp-manager", "MCP Manager - DuckDB gateway and security", "mcp_manager.cli"),
+        ("memo", "Memory and AI tools - memvid, transformers, torch", "memo"),
+    ]
+
+    for name, description, module in tool_list:
+        tools.add_row(name, description, module)
+
+    console.print(tools)
+
+    console.print("\n[bold cyan]Core Commands:[/bold cyan]")
+    commands = Table(show_header=True, header_style="bold magenta")
+    commands.add_column("Command", style="cyan", no_wrap=True)
+    commands.add_column("Description", style="green")
+
+    command_list = [
+        ("aift info", "Display AIFT configuration and status"),
+        ("aift version", "Show version information"),
+        ("aift config-show", "Display current configuration"),
+        ("aift debug", "Enable debug mode and show system info"),
+        ("aift validate", "Validate configuration and environment"),
+        ("aift test", "Run functionality tests"),
+        ("aift list-tools", "List available tools (this command)"),
+        ("aift status", "Show system status and resource usage"),
+        ("aift hello [NAME]", "Example greeting command"),
+    ]
+
+    for cmd, desc in command_list:
+        commands.add_row(cmd, desc)
+
+    console.print(commands)
+
+
+@app.command()
+def status():
+    """Display system status and resource information."""
+    console.print("[bold cyan]AIFT System Status[/bold cyan]\n")
+    logger.info("Displaying system status")
+
+    import psutil
+    import platform
+    from datetime import datetime
+
+    # Create status table
+    status_table = Table(show_header=True, header_style="bold magenta")
+    status_table.add_column("Property", style="cyan", no_wrap=True)
+    status_table.add_column("Value", style="green")
+
+    # System info
+    status_table.add_row("Status", "[green]✓ Running[/green]")
+    status_table.add_row("Timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    status_table.add_row("Platform", platform.platform())
+    status_table.add_row("Python Version", platform.python_version())
+    status_table.add_row("Architecture", platform.machine())
+
+    # Process info
+    try:
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        status_table.add_row("Memory Usage", f"{mem_info.rss / 1024 / 1024:.2f} MB")
+        status_table.add_row("Process ID", str(process.pid))
+    except Exception as e:
+        logger.warning(f"Could not get process info: {e}")
+
+    # CPU info
+    try:
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        status_table.add_row("CPU Usage", f"{cpu_percent}%")
+        status_table.add_row("CPU Count", str(psutil.cpu_count()))
+    except Exception as e:
+        logger.warning(f"Could not get CPU info: {e}")
+
+    # Disk info
+    try:
+        disk = psutil.disk_usage("/")
+        used_percent = (disk.used / disk.total) * 100
+        status_table.add_row("Disk Usage", f"{used_percent:.1f}% ({disk.used / 1024**3:.1f}GB / {disk.total / 1024**3:.1f}GB)")
+    except Exception as e:
+        logger.warning(f"Could not get disk info: {e}")
+
+    # Config status
+    try:
+        config = get_config()
+        status_table.add_row("Config Directory", str(config.config_dir))
+        status_table.add_row("Config Valid", "[green]✓ Yes[/green]")
+    except Exception as e:
+        status_table.add_row("Config Valid", f"[red]✗ {e}[/red]")
+        logger.error(f"Config validation failed: {e}")
+
+    console.print(status_table)
+    console.print("\n[bold green]System is operational![/bold green]")
+    logger.info("System status displayed")
+
+
 def cli_main() -> None:
     """Main entry point for CLI."""
     app()
