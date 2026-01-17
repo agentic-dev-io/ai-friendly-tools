@@ -54,10 +54,26 @@ aift/
 ├── web/               # Web intelligence suite
 ├── mcp-manager/       # DuckDB MCP manager
 ├── memo/              # Memory & AI tools
+├── docs/              # 📖 Documentation (see links below)
 ├── Dockerfile         # Docker image definition
-├── docker-compose.yml # Complete stack (AIFT + SurrealDB)
+├── docker-compose.yml # Complete stack
 └── README.md          # This file
 ```
+
+## Documentation
+
+Detailed guides in `/docs`:
+
+- **[docs/Docker.md](docs/Docker.md)** - Docker setup & commands
+- **[docs/INSTALLATION.md](docs/INSTALLATION.md)** - Local installation
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Project structure & design
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** - Development guide & contributing
+
+Tool-specific docs:
+- [core/README.md](core/README.md) - Core library
+- [web/README.md](web/README.md) - Web tool
+- [mcp-manager/README.md](mcp-manager/README.md) - MCP manager
+- [tests/README_TESTS.md](tests/README_TESTS.md) - Testing guide
 
 ## Docker Setup
 
@@ -165,15 +181,19 @@ docker-compose logs aift-os
 
 ### Debug mode
 ```bash
-docker run -it --rm -e AIFT_LOG_LEVEL=DEBUG aift-os:latest
+AIFT_LOG_LEVEL=DEBUG aift test
 ```
+
+More help in [docs/Docker.md](docs/Docker.md) or [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 ## License
 
 See LICENSE file.
 
-## Support
+## Getting Help
 
-- Documentation in each tool's README
-- Logs at `~/.aift/logs/`
-- Config at `~/.config/aift/`
+- 📖 **[Installation](docs/INSTALLATION.md)** - Get started locally
+- 🐳 **[Docker](docs/Docker.md)** - Container setup  
+- 🏗️ **[Architecture](docs/ARCHITECTURE.md)** - Project structure
+- 👨‍💻 **[Development](docs/DEVELOPMENT.md)** - Contributing guide
+- 🧪 **[Testing](tests/README_TESTS.md)** - Run & write tests
