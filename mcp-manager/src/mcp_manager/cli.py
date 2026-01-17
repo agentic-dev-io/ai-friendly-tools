@@ -23,6 +23,8 @@ from .config import ConnectionConfig, GatewayConfig
 from .discovery.scanner import AsyncToolScanner, ToolRegistry
 from .gateway import MCPGateway
 from .tools.search import ToolSearcher
+from .tools.execution import ToolExecutor, ExecutionContext
+from .tools.validation import ToolValidator, ToolErrorSuggester
 
 app = typer.Typer(
     name="mcp-man",
@@ -744,8 +746,10 @@ def call(
     arguments: str = typer.Argument("{}", help="JSON arguments"),
     stdin: bool = typer.Option(False, "--stdin", help="Read args from stdin"),
     json_mode: bool = typer.Option(False, "--json", help="JSON output"),
+    validate: bool = typer.Option(True, "--validate/--no-validate", help="Validate arguments"),
+    show_timing: bool = typer.Option(False, "--timing", help="Show execution timing"),
 ) -> None:
-    """Execute a tool on an MCP server."""
+    """Execute a tool on an MCP server with validation and error handling."""
     config = get_config()
 
     try:
@@ -764,38 +768,104 @@ def call(
         gateway = MCPGateway(gateway_config, config.config_dir / "databases")
         
         try:
-            # Get database connection and call the tool
             conn = gateway.get_database_connection("default")
-            result = call_tool(conn, server, tool, args_dict)
             
+            # Get tool schema from database
+            query = """
+                SELECT tool_name, description, input_schema, required_params
+                FROM mcp_tools
+                WHERE server_name = ? AND tool_name = ? AND enabled = true
+            """
+            tool_row = conn.execute(query, [server, tool]).fetchone()
+            
+            if not tool_row:
+                console.print(f"[red]✗[/red] Tool '{tool}' not found on server '{server}'")
+                raise typer.Exit(1)
+            
+            tool_name, description, input_schema, required_params = tool_row
+            
+            # Create tool schema object
+            from .tools.schema import ToolSchema
+            tool_schema = ToolSchema(
+                server_name=server,
+                tool_name=tool_name,
+                description=description,
+                input_schema=(
+                    json.loads(input_schema) if isinstance(input_schema, str) else input_schema
+                ),
+                required_params=required_params if isinstance(required_params, list) else [],
+            )
+            
+            # Create execution context
+            exec_context = ExecutionContext(
+                server=server,
+                tool=tool_schema,
+                arguments=args_dict,
+            )
+            
+            # Execute with validation
+            executor = ToolExecutor()
+            exec_result = executor.execute(
+                conn, exec_context, validate=validate, track_history=True
+            )
+            
+            # Display result
             if json_mode:
-                console.print(json.dumps(result, indent=2))
+                console.print(json.dumps(exec_result.to_dict(), indent=2))
             else:
-                # Display result
-                if isinstance(result, str):
-                    try:
-                        result = json.loads(result)
-                    except json.JSONDecodeError:
-                        pass
-                
-                if isinstance(result, dict) and "error" in result:
-                    console.print(f"[red]✗[/red] Tool execution failed: {result['error']}")
-                else:
+                if exec_result.success:
                     console.print("[green]✓[/green] Tool executed successfully")
+                    
+                    # Display result
+                    if isinstance(exec_result.result, str):
+                        try:
+                            result_obj = json.loads(exec_result.result)
+                        except json.JSONDecodeError:
+                            result_obj = exec_result.result
+                    else:
+                        result_obj = exec_result.result
+                    
                     syntax = Syntax(
-                        json.dumps(result, indent=2) if isinstance(result, dict) else str(result),
+                        json.dumps(result_obj, indent=2) if isinstance(result_obj, (dict, list)) else str(result_obj),
                         "json",
                         theme="monokai",
                         line_numbers=False
                     )
                     console.print(syntax)
+                    
+                    if show_timing:
+                        console.print(f"[dim]Execution time: {exec_result.execution_time_ms}ms[/dim]")
+                    
+                else:
+                    console.print(f"[red]✗[/red] Tool execution failed")
+                    
+                    # Show validation errors if any
+                    if exec_result.validation_errors and not exec_result.validation_errors.is_valid:
+                        console.print("\n[yellow]Validation Errors:[/yellow]")
+                        for error in exec_result.validation_errors.errors:
+                            console.print(f"  {error.parameter}: {error.message}")
+                    
+                    # Show execution error
+                    if exec_result.error:
+                        console.print(f"[dim]Error: {exec_result.error}[/dim]")
+                    
+                    # Show suggestions
+                    if exec_result.suggestions:
+                        console.print("\n[yellow]Similar tools found:[/yellow]")
+                        for suggestion_tool, score in exec_result.suggestions[:3]:
+                            console.print(f"  • {suggestion_tool.tool_name} (similarity: {score:.1%})")
+                            if suggestion_tool.description:
+                                console.print(f"    {suggestion_tool.description}")
+                    
+                    raise typer.Exit(1)
             
-            # Log execution
             logger.info(f"Executed tool {server}/{tool} with args {args_dict}")
             
         finally:
             gateway.shutdown()
             
+    except typer.Exit:
+        raise
     except Exception as e:
         console.print(f"[red]✗[/red] Failed to call tool: {e}")
         logger.exception("Tool execution failed")
@@ -919,6 +989,101 @@ def agent(
     except Exception as e:
         console.print(f"[red]✗[/red] Failed to generate AGENT.md: {e}")
         logger.exception("AGENT.md generation failed")
+        raise typer.Exit(1)
+
+
+@app.command()
+def history(
+    server: Optional[str] = typer.Option(None, "--server", help="Filter by server name"),
+    tool: Optional[str] = typer.Option(None, "--tool", help="Filter by tool name"),
+    limit: int = typer.Option(20, "--limit", help="Maximum number of records to show"),
+    success_only: bool = typer.Option(False, "--success", help="Show only successful executions"),
+    failures_only: bool = typer.Option(False, "--failures", help="Show only failed executions"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Show tool execution history."""
+    config = get_config()
+
+    try:
+        gateway_config = load_gateway_config(config)
+        gateway = MCPGateway(gateway_config, config.config_dir / "databases")
+        
+        try:
+            conn = gateway.get_database_connection("default")
+            
+            # Build query
+            query = "SELECT id, server_name, tool_name, arguments, result, success, duration_ms, timestamp FROM mcp_tool_history WHERE 1=1"
+            params: list[Any] = []
+            
+            if server:
+                query += " AND server_name = ?"
+                params.append(server)
+            
+            if tool:
+                query += " AND tool_name = ?"
+                params.append(tool)
+            
+            if success_only:
+                query += " AND success = true"
+            elif failures_only:
+                query += " AND success = false"
+            
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            
+            results = conn.execute(query, params).fetchall()
+            
+            if not results:
+                console.print("[yellow]No execution history found[/yellow]")
+                return
+            
+            if json_output:
+                history_list = []
+                for row in results:
+                    history_list.append({
+                        "id": row[0],
+                        "server": row[1],
+                        "tool": row[2],
+                        "arguments": json.loads(row[3]) if row[3] else None,
+                        "result": json.loads(row[4]) if row[4] else None,
+                        "success": row[5],
+                        "duration_ms": row[6],
+                        "timestamp": row[7],
+                    })
+                console.print(json.dumps(history_list, indent=2))
+            else:
+                # Display as table
+                table = Table(title=f"Tool Execution History (Latest {len(results)})")
+                table.add_column("ID", style="cyan")
+                table.add_column("Server", style="green")
+                table.add_column("Tool", style="blue")
+                table.add_column("Success", style="yellow")
+                table.add_column("Duration", style="magenta")
+                table.add_column("Timestamp", style="dim")
+                
+                for row in results:
+                    exec_id, server_name, tool_name, arguments, result, success, duration_ms, timestamp = row
+                    status = "[green]✓[/green]" if success else "[red]✗[/red]"
+                    duration_str = f"{duration_ms}ms" if duration_ms else "N/A"
+                    table.add_row(
+                        str(exec_id),
+                        server_name or "",
+                        tool_name or "",
+                        status,
+                        duration_str,
+                        timestamp or ""
+                    )
+                
+                console.print(table)
+            
+            logger.info(f"Displayed {len(results)} execution history records")
+            
+        finally:
+            gateway.shutdown()
+            
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to retrieve history: {e}")
+        logger.exception("History retrieval failed")
         raise typer.Exit(1)
 
 
