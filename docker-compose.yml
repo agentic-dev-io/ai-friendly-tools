@@ -1,0 +1,86 @@
+services:
+  aift-os:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: aift-os:latest
+    container_name: aift-os
+
+    # Interactive mode
+    stdin_open: true
+    tty: true
+
+    # Volumes for persistence
+    volumes:
+      # Project workspace for user files
+      - ./workspace:/workspace/user
+      # Config persistence
+      - aift-config:/home/aift/.config
+      # Logs persistence
+      - aift-logs:/home/aift/aift/logs
+
+
+    # Environment variables
+    environment:
+      - AIFT_LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+      - CLAUDE_CODE_SANDBOX=true
+
+    # Network
+    networks:
+      - aift-network
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: surrealdb
+    command: start --log info --user root --pass root file:/data/database.db
+    ports:
+      - "8888:8000" # SurrealDB WebSocket/HTTP (host:container)
+    volumes:
+      - ./workspace/surrealdb:/data
+    networks:
+      - aift-network
+    restart: unless-stopped
+
+  surrealmcp:
+    image: surrealdb/surrealmcp:latest
+    container_name: surrealmcp
+    command: start --auth-disabled --bind-address 0.0.0.0:8080 --server-url http://surrealmcp:8080 --rate-limit-rps 1000 --rate-limit-burst 2000
+    ports:
+      - "8200:8080" # SurrealMCP HTTP server
+    volumes:
+      - ./workspace:/workspace
+    networks:
+      - aift-network
+    restart: unless-stopped
+    depends_on:
+      - surrealdb
+    environment:
+      - SURREALDB_URL=http://surrealdb:8000
+      - SURREALDB_USER=root
+      - SURREALDB_PASS=root
+
+volumes:
+  aift-config:
+    driver: local
+  aift-logs:
+    driver: local
+
+networks:
+  aift-network:
+    driver: bridge

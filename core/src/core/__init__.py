@@ -1,2 +1,3 @@
-def hello() -> str:
-    return "Hello from core!"
+"""AI-Friendly Tools Package."""
+
+__version__ = "0.1.0"

@@ -1,0 +1,66 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+*.egg
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# Virtual environments
+.venv
+venv
+ENV
+env
+.env
+
+# UV
+.uv
+uv.lock
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Project specific
+archive/
+temp-aift/
+aift-cli/
+example-tool/
+
+# Node
+node_modules
+.npm
+.bun
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# CI/CD
+.github
+.gitlab-ci.yml
+
+# Logs
+*.log
+logs/
+
+# OS
+Thumbs.db
