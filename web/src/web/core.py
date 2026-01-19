@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 import duckdb
+import httpx
 from loguru import logger
 from pydantic import BaseModel
 
@@ -288,80 +290,58 @@ class Web:
             return f"❌ Search failed: {e}"
 
     async def _scrape(self, url: str, search_id: Optional[int] = None) -> str:
-        """Fetch URL with DuckDB httpfs and parse with webbed using advanced XPath."""
+        """Fetch URL and parse content using httpx + regex (reliable, no DuckDB webbed issues)."""
+        import re
+        import httpx
+        
         try:
-            # Use DuckDB httpfs to fetch URL and webbed to parse with XPath
-            result = self.db.execute(
-                """
-                WITH fetched AS (
-                    SELECT * FROM read_text(?)
-                ),
-                parsed AS (
-                    SELECT 
-                        -- Title extraction with fallbacks
-                        COALESCE(
-                            html_extract_text(content::HTML, '//title'),
-                            html_extract_text(content::HTML, '//h1'),
-                            html_extract_text(content::HTML, '//meta[@property="og:title"]/@content'),
-                            ''
-                        ) as title,
-                        
-                        -- Clean content extraction (main text only, no nav/footer/scripts)
-                        COALESCE(
-                            html_extract_text(content::HTML, '//main'),
-                            html_extract_text(content::HTML, '//article'),
-                            html_extract_text(content::HTML, '//body')
-                        ) as content,
-                        
-                        -- Structured links
-                        html_extract_links(content::HTML) as links,
-                        
-                        -- Structured images with metadata
-                        html_extract_images(content::HTML) as images,
-                        
-                        -- Extract tables as structured data (using table function)
-                        '[]'::JSON as tables,
-                        
-                        -- Meta description
-                        COALESCE(
-                            html_extract_text(content::HTML, '//meta[@name="description"]/@content'),
-                            html_extract_text(content::HTML, '//meta[@property="og:description"]/@content'),
-                            ''
-                        ) as meta_description,
-                        
-                        -- Meta keywords
-                        COALESCE(
-                            html_extract_text(content::HTML, '//meta[@name="keywords"]/@content'),
-                            ''
-                        ) as meta_keywords,
-                        
-                        -- Raw HTML
-                        content as html
-                    FROM fetched
-                )
-                SELECT * FROM parsed
-            """,
-                (url,),
-            ).fetchone()
-
-            if not result:
-                return "❌ Scrape failed: No content fetched"
-
-            (
-                title,
-                content,
-                links,
-                images,
-                tables,
-                meta_description,
-                meta_keywords,
-                html,
-            ) = result
-
-            # Calculate word count for AI context estimation
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, follow_redirects=True)
+                
+            if resp.status_code != 200:
+                return f"❌ HTTP Error: {resp.status_code}"
+            
+            html = resp.text
+            
+            # Extract data with simple regex (no DuckDB webbed needed)
+            # Title
+            title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+            title = title_match.group(1).strip() if title_match else ""
+            
+            # Meta description
+            meta_desc = re.search(r'<meta[^>]*name=[\"\']description[\"\'][^>]*content=[\"\']([^\"\']+)[\"\']', html, re.IGNORECASE)
+            meta_description = meta_desc.group(1) if meta_desc else ""
+            
+            # Meta keywords
+            meta_keys = re.search(r'<meta[^>]*name=[\"\']keywords[\"\'][^>]*content=[\"\']([^\"\']+)[\"\']', html, re.IGNORECASE)
+            meta_keywords = meta_keys.group(1) if meta_keys else ""
+            
+            # Main content
+            main_match = re.search(r'<main[^>]*>(.+?)</main>', html, re.IGNORECASE | re.DOTALL)
+            if main_match:
+                content_html = main_match.group(1)
+            else:
+                body_match = re.search(r'<body[^>]*>(.+?)</body>', html, re.IGNORECASE | re.DOTALL)
+                content_html = body_match.group(1) if body_match else html
+            
+            # Clean HTML: remove scripts, styles, nav, footer
+            content_html = re.sub(r'<script[^>]*>.*?</script>', '', content_html, flags=re.IGNORECASE | re.DOTALL)
+            content_html = re.sub(r'<style[^>]*>.*?</style>', '', content_html, flags=re.IGNORECASE | re.DOTALL)
+            content_html = re.sub(r'<nav[^>]*>.*?</nav>', '', content_html, flags=re.IGNORECASE | re.DOTALL)
+            content_html = re.sub(r'<footer[^>]*>.*?</footer>', '', content_html, flags=re.IGNORECASE | re.DOTALL)
+            content_html = re.sub(r'<header[^>]*>.*?</header>', '', content_html, flags=re.IGNORECASE | re.DOTALL)
+            
+            # Convert HTML to plain text
+            content = re.sub(r'<[^>]+>', ' ', content_html)
+            content = re.sub(r'\s+', ' ', content).strip()
+            
+            # Count links and images
+            links = re.findall(r'<a[^>]+href=[\"\']([^\"\']+)[\"\']', html, re.IGNORECASE)
+            images = re.findall(r'<img[^>]+src=[\"\']([^\"\']+)[\"\']', html, re.IGNORECASE)
+            
             word_count = len(content.split()) if content else 0
-
-            # Store in DB using UPSERT (DuckDB supports UPSERT)
+            
+            # Store in DB
             self.db.execute(
                 """
                 INSERT INTO web_content (url, title, content, html, links, images, tables, 
@@ -387,25 +367,19 @@ class Web:
                     html,
                     json.dumps(links),
                     json.dumps(images),
-                    json.dumps(tables),
+                    '[]',
                     meta_description,
                     meta_keywords,
                     word_count,
                     search_id,
                 ),
             )
-
-            # Trigger LSH hash update if knowledge module is used
-            # This will be handled by KnowledgeExtractor when content is searched
-
-            # Update FTS index only if it doesn't exist
+            
+            # Update FTS index only if needed
             try:
-                # Check if FTS index exists
                 result = self.db.execute("PRAGMA show_tables").fetchall()
-                fts_exists = any(
-                    "fts_main_web_content" in str(table) for table in result
-                )
-
+                fts_exists = any("fts_main_web_content" in str(table) for table in result)
+                
                 if not fts_exists:
                     self.db.execute(
                         """
@@ -420,13 +394,12 @@ class Web:
                         )
                     """
                     )
-                    logger.info("FTS index created successfully")
             except Exception as e:
                 logger.warning(f"FTS index update failed: {e}")
-
+            
             content_preview = content[:300] + "..." if len(content) > 300 else content
-            stats = f"Words: {word_count}, Links: {len(links) if links else 0}, Images: {len(images) if images else 0}, Tables: {len(tables) if tables else 0}"
-
+            stats = f"Words: {word_count}, Links: {len(links)}, Images: {len(images)}"
+            
             logger.success(f"Scraped {url}")
             return f"""✅ Scraped {url}:
 
