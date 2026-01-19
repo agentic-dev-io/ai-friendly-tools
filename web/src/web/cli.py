@@ -3,12 +3,15 @@
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import typer
 from loguru import logger
 from rich.console import Console
+from rich.table import Table
 
 from core.logging import setup_logging
 
@@ -459,6 +462,199 @@ def workflow_autolearn(
     async def run():
         try:
             await run_workflow_autolearn(web, base_url, workflow_id, iterations)
+        finally:
+            await web.close()
+    
+    asyncio.run(run())
+
+
+# ============================================================================
+# NEW COMMANDS: Auto-scrape, Search-DB, Stats, List
+# ============================================================================
+
+
+@app.command()
+def scrape_all(
+    url: str = typer.Argument(..., help="URL to scrape (main page)"),
+    max_pages: int = typer.Option(50, "--max", "-n", help="Maximum pages to scrape"),
+    delay: float = typer.Option(0.3, "--delay", "-d", help="Delay between requests (seconds)"),
+    db_path: Optional[str] = typer.Option(None, "--db-path", help="Path to DuckDB database"),
+) -> None:
+    """Scrape URL and all subpages automatically."""
+    import httpx
+    
+    console.print(f"[bold]🔄 Auto-scraping: {url}[/bold]")
+    console.print(f"   Max pages: {max_pages} | Delay: {delay}s")
+    console.print("-" * 60)
+    
+    config = WebConfig(db_path=db_path or "./data/web.db")
+    web = Web(config)
+    
+    async def get_links(page_url):
+        """Extract all links from a page."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(page_url, follow_redirects=True)
+                if resp.status_code != 200:
+                    return []
+                links = re.findall(r'<a[^>]+href=[\"\']([^\"\']+)[\"\']', resp.text, re.IGNORECASE)
+                # Filter links from same domain
+                base = url.split("/documentation/")[0]
+                valid = []
+                for link in links:
+                    if "/documentation/" in link and base in link:
+                        valid.append(link)
+                    elif link.startswith(url):
+                        valid.append(link)
+                return list(set(valid))
+        except:
+            return []
+    
+    async def run():
+        scraped = set()
+        to_scrape = [url]
+        
+        with console.status("[bold]Scraping...") as status:
+            while to_scrape and len(scraped) < max_pages:
+                current = to_scrape.pop(0)
+                if current in scraped:
+                    continue
+                    
+                status.update(f"Scraping {len(scraped) + 1}/{max_pages}: {current[:60]}...")
+                
+                try:
+                    await web.execute("scrape", url=current)
+                    scraped.add(current)
+                    console.print(f"  ✅ {len(scraped)}: {current[:70]}...")
+                    
+                    # Get new links
+                    new_links = await get_links(current)
+                    for link in new_links:
+                        if link not in scraped and link not in to_scrape:
+                            to_scrape.append(link)
+                            
+                except Exception as e:
+                    console.print(f"  ❌ Error: {e}")
+                
+                await asyncio.sleep(delay)
+        
+        console.print("-" * 60)
+        console.print(f"[green]✅ Done! Scraped {len(scraped)} pages[/green]")
+        
+        # Show stats
+        total = web.db.execute("SELECT COUNT(*), SUM(word_count) FROM web_content").fetchone()
+        console.print(f"   Total in DB: {total[0]} pages, {total[1]:,} words")
+        
+        await web.close()
+    
+    asyncio.run(run())
+
+
+@app.command()
+def search_db(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Maximum results"),
+    db_path: Optional[str] = typer.Option(None, "--db-path", help="Path to DuckDB database"),
+) -> None:
+    """Search in scraped database content."""
+    config = WebConfig(db_path=db_path or "./data/web.db")
+    web = Web(config)
+    
+    async def run():
+        try:
+            results = web.db.execute(
+                "SELECT url, title, word_count FROM web_content "
+                "WHERE content LIKE ? OR title LIKE ? "
+                "ORDER BY word_count DESC LIMIT ?",
+                [f"%{query}%", f"%{query}%", limit]
+            ).fetchall()
+            
+            if not results:
+                console.print("[yellow]No results found[/yellow]")
+            else:
+                table = Table(title=f"🔍 Search Results for '{query}'")
+                table.add_column("#", style="cyan")
+                table.add_column("Title", style="green")
+                table.add_column("Words", style="yellow")
+                
+                for i, (url, title, words) in enumerate(results, 1):
+                    title_short = (title[:50] + "...") if title and len(title) > 50 else title or "N/A"
+                    table.add_row(str(i), title_short, str(words))
+                
+                console.print(table)
+                console.print(f"\n[dim]Found {len(results)} results[/dim]")
+        finally:
+            await web.close()
+    
+    asyncio.run(run())
+
+
+@app.command()
+def stats(
+    db_path: Optional[str] = typer.Option(None, "--db-path", help="Path to DuckDB database"),
+) -> None:
+    """Show database statistics."""
+    config = WebConfig(db_path=db_path or "./data/web.db")
+    web = Web(config)
+    
+    async def run():
+        try:
+            # Get stats
+            total, words = web.db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(word_count), 0) FROM web_content"
+            ).fetchone()
+            
+            links = web.db.execute("SELECT COALESCE(SUM(LENGTH(links) - LENGTH(REPLACE(links, ',', '')) + 1), 0) FROM web_content").fetchone()[0] or 0
+            images = web.db.execute("SELECT COALESCE(SUM(LENGTH(images) - LENGTH(REPLACE(images, ',', '')) + 1), 0) FROM web_content").fetchone()[0] or 0
+            
+            # Create stats table
+            table = Table(title="📊 Web Database Statistics")
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", style="green")
+            
+            table.add_row("Total Pages", str(total))
+            table.add_row("Total Words", f"{words:,}")
+            table.add_row("Total Links", str(links))
+            table.add_row("Total Images", str(images))
+            
+            console.print(table)
+        finally:
+            await web.close()
+    
+    asyncio.run(run())
+
+
+@app.command()
+def list(
+    limit: int = typer.Option(20, "--limit", "-n", help="Maximum pages to show"),
+    db_path: Optional[str] = typer.Option(None, "--db-path", help="Path to DuckDB database"),
+) -> None:
+    """List all scraped pages."""
+    config = WebConfig(db_path=db_path or "./data/web.db")
+    web = Web(config)
+    
+    async def run():
+        try:
+            results = web.db.execute(
+                "SELECT url, title, word_count, fetched_at "
+                "FROM web_content ORDER BY fetched_at DESC LIMIT ?",
+                [limit]
+            ).fetchall()
+            
+            if not results:
+                console.print("[yellow]No pages scraped yet. Use 'web scrape <url>' first.[/yellow]")
+            else:
+                table = Table(title=f"📄 Scraped Pages (showing {len(results)})")
+                table.add_column("#", style="cyan", width=4)
+                table.add_column("Title", style="green")
+                table.add_column("Words", style="yellow", width=8)
+                table.add_column("Fetched", style="dim", width=20)
+                
+                for i, (url, title, words, fetched) in enumerate(results, 1):
+                    title_short = (title[:45] + "...") if title and len(title) > 45 else title or "N/A"
+                    table.add_row(str(i), title_short, str(words), str(fetched)[:19])
+                
+                console.print(table)
         finally:
             await web.close()
     
