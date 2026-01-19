@@ -269,6 +269,19 @@ pytest tests/ -v -s
 - Review dependency vulnerabilities regularly
 - Follow secure coding practices for CLI tools
 
+## Specialized Copilot Agents
+
+This repository includes custom agents with domain-specific expertise. For complex tasks, leverage these specialized agents:
+
+- **Python Expert** ([agents/python-expert.agent.md](agents/python-expert.agent.md)): Python 3.11+, UV workspace, type hints
+- **CLI Specialist** ([agents/cli-specialist.agent.md](agents/cli-specialist.agent.md)): Typer, Rich, CLI best practices
+- **Testing Specialist** ([agents/testing-specialist.agent.md](agents/testing-specialist.agent.md)): Pytest, coverage, mocking
+- **Docker Specialist** ([agents/docker-specialist.agent.md](agents/docker-specialist.agent.md)): Dockerfile, docker-compose, optimization
+- **Documentation Writer** ([agents/documentation-writer.agent.md](agents/documentation-writer.agent.md)): READMEs, API docs, guides
+- **DuckDB Expert** ([agents/duckdb-expert.agent.md](agents/duckdb-expert.agent.md)): Schema design, queries, semantic search
+
+See [AGENTS.md](AGENTS.md) for detailed agent documentation and usage guidelines.
+
 ## Best Practices
 
 1. **Write tests first**: Use TDD approach when possible

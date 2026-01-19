@@ -86,6 +86,10 @@ Tool-specific docs:
 - [mcp-manager/README.md](mcp-manager/README.md) - MCP manager
 - [tests/README_TESTS.md](tests/README_TESTS.md) - Testing guide
 
+AI/Copilot configuration:
+- [.github/copilot-instructions.md](.github/copilot-instructions.md) - Copilot instructions
+- [.github/AGENTS.md](.github/AGENTS.md) - Specialized Copilot agents
+
 ## Docker Setup
 
 ### What's Included
