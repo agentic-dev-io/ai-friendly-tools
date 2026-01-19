@@ -7,7 +7,8 @@ AIFT (AI-Friendly Tools) is a collection of command-line tools optimized for AI 
 - **core**: Core library with config, logging, and CLI framework
 - **web**: Web intelligence suite (search, scrape, API tools)
 - **mcp-manager**: DuckDB-based MCP manager with semantic search
-- **memo**: Memory & AI tools
+
+Note: The `memo` package (Memory & AI tools) exists in the repository but is not currently included in the UV workspace configuration.
 
 ## Build and Test Commands
 
@@ -16,8 +17,10 @@ AIFT (AI-Friendly Tools) is a collection of command-line tools optimized for AI 
 # Install dependencies using UV (recommended)
 uv sync --all-groups
 
-# Alternative: Install packages in development mode using pip
-pip install -e core web mcp-manager memo
+# Alternative: Install workspace packages in development mode using pip
+# Note: memo package is not in the workspace, install separately if needed
+pip install -e core web mcp-manager
+pip install -e memo  # Optional, not in workspace
 ```
 
 ### Testing
@@ -25,8 +28,8 @@ pip install -e core web mcp-manager memo
 # Run all tests
 uv run pytest tests/ -v
 
-# Run tests with coverage
-uv run pytest tests/ -v --cov=core/src --cov=web/src --cov=memo/src --cov=mcp-manager/src --cov-report=term-missing
+# Run tests with coverage (for workspace packages)
+uv run pytest tests/ -v --cov=core/src --cov=web/src --cov=mcp-manager/src --cov-report=term-missing
 
 # Run specific test file
 uv run pytest tests/test_cli.py -v
@@ -49,8 +52,8 @@ uv run ruff format . --check
 
 ### Type Checking
 ```bash
-# Run type checker with MyPy
-uv run mypy core/src web/src memo/src mcp-manager/src --strict
+# Run type checker with MyPy (for workspace packages)
+uv run mypy core/src web/src mcp-manager/src --strict
 ```
 
 ### Docker
@@ -100,19 +103,19 @@ ai-friendly-tools/
 ├── .github/                 # GitHub configuration and workflows
 │   ├── workflows/          # CI/CD workflows
 │   └── copilot-instructions.md
-├── core/                   # Core library package
+├── core/                   # Core library package (workspace member)
 │   ├── src/               # Source code
 │   ├── pyproject.toml     # Package configuration
 │   └── README.md          # Core documentation
-├── web/                   # Web tools package
+├── web/                   # Web tools package (workspace member)
 │   ├── src/
 │   ├── pyproject.toml
 │   └── README.md
-├── mcp-manager/           # MCP manager package
+├── mcp-manager/           # MCP manager package (workspace member)
 │   ├── src/
 │   ├── pyproject.toml
 │   └── README.md
-├── memo/                  # Memory & AI tools package
+├── memo/                  # Memory & AI tools package (not in workspace)
 │   ├── src/
 │   └── pyproject.toml
 ├── tests/                 # All tests (repository level)
@@ -142,7 +145,8 @@ ai-friendly-tools/
 4. Run linter: `uv run ruff check .`
 5. Run formatter: `uv run ruff format .`
 6. Run tests: `uv run pytest tests/ -v`
-7. Run type checker: `uv run mypy core/src web/src memo/src mcp-manager/src --strict` (warnings are acceptable)
+7. Run type checker: `uv run mypy core/src web/src mcp-manager/src --strict` (warnings acceptable)
+   - Note: CI also checks memo/src, but it's not in the workspace
 8. Commit with descriptive messages
 9. Create pull request targeting `main` or `develop`
 
@@ -151,7 +155,7 @@ The CI workflow runs on all pull requests:
 - Linting with Ruff (style, errors, imports, naming)
 - Format checking with Ruff
 - Type checking with MyPy (strict mode, failures are non-blocking)
-- Tests with pytest and coverage reporting
+- Tests with pytest and coverage reporting (workspace packages: core, web, mcp-manager)
 - Security scanning with Trivy
 - Docker image build (on main branch pushes)
 
