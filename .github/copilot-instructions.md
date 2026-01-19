@@ -13,11 +13,11 @@ AIFT (AI-Friendly Tools) is a collection of command-line tools optimized for AI 
 
 ### Setup
 ```bash
-# Install dependencies using UV
+# Install dependencies using UV (recommended)
 uv sync --all-groups
 
-# Install packages in development mode
-py -m pip install -e core web mcp-manager memo
+# Alternative: Install packages in development mode using pip
+pip install -e core web mcp-manager memo
 ```
 
 ### Testing
@@ -71,7 +71,7 @@ docker-compose logs -f
 ## Code Style and Conventions
 
 ### Python Standards
-- **Python Version**: 3.11+ (support 3.11 and 3.12)
+- **Python Version**: >=3.11 (as specified in pyproject.toml; CI tests 3.11 and 3.12)
 - **Line Length**: 100 characters (configured in pyproject.toml)
 - **Import Ordering**: Use Ruff's isort integration (I rules)
 - **Naming**: Follow PEP 8 conventions (N rules)
@@ -164,16 +164,18 @@ The CI workflow runs on all pull requests:
 ## Key Tools and Libraries
 
 ### Core Dependencies
-- **Pydantic** (2.12.5): Data validation and settings
-- **Typer** (0.21.1): CLI framework
-- **Rich** (14.2.0): Terminal UI and formatting
-- **DuckDB** (1.4.3): Embedded SQL database
+See individual package `pyproject.toml` files for specific version requirements:
+- **Pydantic** (>=2.12.5): Data validation and settings
+- **Typer** (>=0.21.1): CLI framework
+- **Rich** (>=14.2.0): Terminal UI and formatting
+- **DuckDB** (>=1.4.3): Embedded SQL database
 
 ### Development Tools
+See root `pyproject.toml` for version requirements:
 - **UV**: Fast Python package manager
-- **Ruff** (0.14.13): Fast Python linter and formatter
-- **MyPy** (1.19.1): Static type checker
-- **Pytest** (9.0.2): Testing framework
+- **Ruff** (>=0.14.13): Fast Python linter and formatter
+- **MyPy** (>=1.19.1): Static type checker
+- **Pytest** (>=9.0.2): Testing framework
 
 ## Docker Environment
 
