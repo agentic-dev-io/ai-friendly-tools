@@ -110,6 +110,15 @@ RUN bun add -g @anthropic-ai/claude-code @anthropic-ai/sandbox-runtime
 # Install Serena Coding Agent Toolkit
 RUN uv tool install git+https://github.com/oraios/serena.git
 
+# Install OpenCode AI Coding Agent
+# OpenCode is an open-source AI coding agent (https://opencode.ai)
+# Supports Claude Code integration, TUI, and programmatic API access
+RUN wget https://github.com/anomalyco/opencode/releases/download/v1.1.25/opencode-linux-x64.tar.gz && \
+    tar -xzf opencode-linux-x64.tar.gz && \
+    mv opencode /home/aift/.local/bin/ && \
+    chmod +x /home/aift/.local/bin/opencode && \
+    rm opencode-linux-x64.tar.gz
+
 # Copy AIFT workspace
 COPY --chown=aift:aift . /workspace/aift
 WORKDIR /workspace/aift
