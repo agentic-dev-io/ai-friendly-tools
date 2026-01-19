@@ -39,12 +39,23 @@ web scrape "https://url"
 web api "https://api.url"
 ```
 
-### MCP Manager
+### MCP Manager (AI-Friendly)
 ```bash
-mcp-man status
-mcp-man connections
-mcp-man query "SELECT * FROM table"
+mcp-man ask "how to read a CSV?" # NLP Search ✨
+mcp-man workflow run my-pipe      # Run Workflow ✨
+mcp-man examples server tool      # AI Examples ✨
+mcp-man export markdown           # LLM Export ✨
+mcp-man history --failures        # Audit Trail
 ```
+
+## AI Features (Phase 3 Complete)
+
+- ✅ **Semantic Search**: DuckDB-native vector search (MiniLM-L6-v2)
+- ✅ **NLP Engine**: Natural language query parsing & intent matching
+- ✅ **Smart Workflows**: Chain tools with intelligent recommendations
+- ✅ **Auto-Examples**: Generates usage examples from tool schemas
+- ✅ **LLM Integration**: Optimized prompt/doc exports for Claude & GPT
+
 
 ## Project Structure
 
