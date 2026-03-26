@@ -1,5 +1,7 @@
 # AIFT - AI-Friendly Tools
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/N4N71WOHZ3)
+
 Command-line tools optimized for AI interaction. Simple, clear, context-aware.
 
 ## Quick Start
